@@ -41,6 +41,8 @@ dsh --profile web --dump-config | grep model-session-headers
 
 在 web profile 里，插件会出现在「设置 → 插件 → Installed plugins」，点进去有一张配置卡片，展示配置位置和一段可一键复制的 YAML 示例。
 
+![设置页里的配置卡片](docs/settings-card.png)
+
 卡片是**只读**的，这不是偷懒：DSH 0.2 的设置表单由 `SettingsForms` 投影，只接受 `volatile` 标量字段，而 `validateVolatileSchema()` 明确禁止 volatile 出现在数组内部，`SettingsForms.write()` 也会拒绝任何不在 volatile 路径上的写入。我们的核心配置 `rules` 是数组，所以无法通过官方表单编辑——规则只能改 `cordis.patch.yml`。
 
 ## 配置
