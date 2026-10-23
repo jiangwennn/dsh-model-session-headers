@@ -95,7 +95,11 @@ export const Config = Schema.object({
   debug: Schema.boolean().default(false).description('输出调试日志'),
   /** Append one JSON line per injected call to this absolute path. */
   debugFile: Schema.string().description('调试日志文件（绝对路径）'),
-})
+  // `volatile` is what makes the DSH settings page render this plugin's form:
+  // SettingsForms.describe() only projects fields whose nearest volatile
+  // ancestor is marked, and DSH re-applies the plugin on a live edit. Without
+  // it the plugin row has no configuration UI at all.
+}).volatile()
 
 /* ------------------------------------------------------------------ */
 /* Pure helpers (exported for tests)                                   */
