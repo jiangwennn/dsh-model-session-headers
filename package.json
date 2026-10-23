@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-session-headers",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Per-model session-id headers for DeepSeek Harness: attach Claude Code (x-claude-code-session-id) or OpenCode Go (x-opencode-session) compatible headers to the models you choose.",
   "type": "module",
   "main": "index.js",

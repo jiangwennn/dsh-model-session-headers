@@ -247,6 +247,15 @@ describe('llm/stream injection', () => {
     assert.equal(replaced['x-claude-code-session-id'], 'abc')
   })
 
+  test('an existing but empty header is filled in', async () => {
+    const headers = await callModel(
+      baseConfig,
+      { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-abc' },
+      { headers: { 'x-claude-code-session-id': '' } },
+    )
+    assert.equal(headers['x-claude-code-session-id'], 'abc')
+  })
+
   test('a per-rule overwrite flag beats the global setting', async () => {
     const config = {
       ...baseConfig,

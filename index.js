@@ -277,18 +277,23 @@ export function apply(ctx, config) {
     ? config.debugFile
     : undefined
 
-  const record = (options, headers) => {
+  const record = (meta, injected, skipped) => {
     if (!debug && debugFile === undefined) return
     const entry = {
       ts: new Date().toISOString(),
-      provider: resolveProvider(options),
-      model: resolveModelId(options),
-      session: sessionIdOf(options, config?.keepPrefix === true),
-      headers,
+      provider: meta.provider,
+      model: meta.model,
+      session: meta.session,
+      headers: injected,
     }
+    // Headers deliberately left alone because the adapter already sent one.
+    // A non-empty placeholder here is the usual "gateway says the header is
+    // missing" cause; turning `overwrite` on replaces it.
+    if (skipped.length > 0) entry.skipped = skipped
     if (debug) {
       ctx.logger?.info?.(
-        `[model-session-headers] ${entry.provider ?? '?'}/${entry.model ?? '?'} -> ${JSON.stringify(headers)}`,
+        `[model-session-headers] ${entry.provider ?? '?'}/${entry.model ?? '?'} -> ${JSON.stringify(injected)}` +
+          (skipped.length > 0 ? ` (kept existing: ${JSON.stringify(skipped)})` : ''),
       )
     }
     if (debugFile !== undefined) {
@@ -305,7 +310,15 @@ export function apply(ctx, config) {
     const headers = buildHeaders(config, rule, options)
     if (headers.length === 0) return undefined
     const overwrite = rule.overwrite === undefined ? config?.overwrite === true : rule.overwrite === true
-    return { headers, overwrite }
+    return {
+      headers,
+      overwrite,
+      meta: {
+        provider: resolveProvider(options),
+        model: resolveModelId(options),
+        session: sessionIdOf(options, config?.keepPrefix === true),
+      },
+    }
   }
 
   const patchedFetch = (input, init) => {
@@ -319,12 +332,21 @@ export function apply(ctx, config) {
       for (const [key, value] of new Headers(init.headers)) headers.set(key, value)
     }
 
-    let injected = []
+    const injected = []
+    const skipped = []
     for (const [headerName, value] of scope.headers) {
-      if (!scope.overwrite && headers.has(headerName)) continue
+      const existing = headers.get(headerName)
+      // An empty value is indistinguishable from "not sent" to the gateway,
+      // so treat it as absent and fill it in. Only a real value blocks us
+      // unless `overwrite` is on.
+      if (!scope.overwrite && existing !== null && existing.trim() !== '') {
+        skipped.push([headerName, existing])
+        continue
+      }
       headers.set(headerName, value)
       injected.push([headerName, value])
     }
+    if (injected.length > 0 || skipped.length > 0) record(scope.meta, injected, skipped)
     if (injected.length === 0) return originalFetch(input, init)
 
     // A bare Request input owns its headers; rebuild it so the original —
@@ -354,8 +376,6 @@ export function apply(ctx, config) {
       yield* next()
       return
     }
-    record(options, scope.headers)
-
     const iterator = next()[Symbol.asyncIterator]()
     let exhausted = false
     try {
