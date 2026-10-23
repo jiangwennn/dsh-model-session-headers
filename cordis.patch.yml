@@ -1,0 +1,35 @@
+# Layer applied when a profile lists this bundle.
+#
+# Install:
+#   dsh plugin --profile web add /abs/path/to/dsh-model-session-headers
+#
+# Rules are evaluated top-down; the first match wins. Each rule selects a
+# header preset by `flavor` and can add/override headers with `headers`.
+#
+# `rules` is empty by default so the plugin stays idle until you opt in.
+- insert:
+    - id: model-session-headers
+      name: dsh-model-session-headers
+      config:
+        mode: session-id      # session-id | uuid | fixed
+        # value: my-fixed-id  # required when mode: fixed
+        keepPrefix: false     # strip the harness "session-" prefix
+        overwrite: false      # never replace a header the adapter already set
+        debug: false
+        # debugFile: /tmp/model-session-headers.jsonl
+        rules: []
+        # Example: Claude Code compatible header for Anthropic-style models
+        #   - models: ["claude-*", "anthropic/claude-*"]
+        #     flavor: claude-code
+        #
+        # Example: OpenCode Go compatible header for OpenCode-routed models
+        #   - models: ["deepseek-v4*"]
+        #     providers: [opencode-go]
+        #     flavor: opencode-go
+        #
+        # Example: fully custom headers for one model
+        #   - models: ["my-gateway-model"]
+        #     headers:
+        #       x-session-id: "{sessionId}"
+        #       x-tenant: acme
+        #       x-routing-key: "{provider}/{model}"
