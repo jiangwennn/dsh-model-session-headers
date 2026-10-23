@@ -39,11 +39,16 @@ dsh --profile web --dump-config | grep model-session-headers
 
 ## 设置界面
 
-在 web profile 里，插件会出现在「设置 → 插件 → Installed plugins」，点进去有一张配置卡片，展示配置位置和一段可一键复制的 YAML 示例。
+web profile 里，打开「设置 → 插件 → Installed plugins → dsh-model-session-headers」，可以直接编辑规则：添加/删除、填模型 glob、选 flavor、启用开关。保存后**无需重启**，下一次模型调用即生效。
 
-![设置页里的配置卡片](docs/settings-card.png)
+![设置页里的规则编辑器](docs/settings-card.png)
 
-卡片是**只读**的，这不是偷懒：DSH 0.2 的设置表单由 `SettingsForms` 投影，只接受 `volatile` 标量字段，而 `validateVolatileSchema()` 明确禁止 volatile 出现在数组内部，`SettingsForms.write()` 也会拒绝任何不在 volatile 路径上的写入。我们的核心配置 `rules` 是数组，所以无法通过官方表单编辑——规则只能改 `cordis.patch.yml`。
+保存写入的是 profile 的 `cordis.patch.yml`（行 id `model-session-headers`），与手写 YAML 完全等价，两种方式可以混用。
+
+实现上有两个坑，都已在代码里处理：
+
+- `rules` 必须声明 `.volatile()`，否则 `SettingsForms.write()` 以 `not volatile` 拒绝写入；但 volatile 字段会被 DSH 换成 **observable** 传给插件，直接 `.filter()` 会抛错，所以读取统一走 `unwrapRules()`。
+- 插槽渲染器以普通函数调用的方式执行组件，**函数组件里的 React hooks 不生效**（组件静默不渲染），所以卡片写成 class 组件。
 
 ## 配置
 

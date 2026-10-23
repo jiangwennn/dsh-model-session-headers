@@ -68,7 +68,16 @@ export const Config = Schema.object({
   keepPrefix: Schema.boolean().default(false).description('是否保留 session- 前缀'),
   /** Overwrite a header the adapter (or another plugin) already set. */
   overwrite: Schema.boolean().default(false).description('已存在同名头时是否覆盖'),
-  /** Ordered rule table; the first matching rule wins. Empty = plugin idle. */
+  /**
+   * Ordered rule table; the first matching rule wins. Empty = plugin idle.
+   *
+   * `volatile` is what makes this list writable from the settings page:
+   * SettingsForms refuses any write path that is not volatile, and a volatile
+   * *field* is legal (only volatile nodes INSIDE a list are rejected). DSH then
+   * hands the plugin a live observable instead of a plain array, so every read
+   * goes through `unwrapRules()`. Note the field loses its `.default([])` when
+   * wrapped — `unwrapRules(undefined)` covers that.
+   */
   rules: Schema.array(
     Schema.object({
       /** Glob patterns matched against the model id (`*`, `?`). Empty = any. */
@@ -90,16 +99,12 @@ export const Config = Schema.object({
       overwrite: Schema.boolean().description('该规则是否覆盖已存在的头'),
       enabled: Schema.boolean().default(true).description('是否启用该规则'),
     }),
-  ).default([]).description('按模型匹配的规则表'),
+  ).default([]).volatile().description('按模型匹配的规则表'),
   /** Log every injected call to the dsh console. */
   debug: Schema.boolean().default(false).description('输出调试日志'),
   /** Append one JSON line per injected call to this absolute path. */
   debugFile: Schema.string().description('调试日志文件（绝对路径）'),
-  // `volatile` is what makes the DSH settings page render this plugin's form:
-  // SettingsForms.describe() only projects fields whose nearest volatile
-  // ancestor is marked, and DSH re-applies the plugin on a live edit. Without
-  // it the plugin row has no configuration UI at all.
-}).volatile()
+})
 
 /* ------------------------------------------------------------------ */
 /* Pure helpers (exported for tests)                                   */
@@ -153,9 +158,20 @@ export function matchesAny(patterns, value) {
   })
 }
 
+/**
+ * Unwrap a rule list that DSH may hand over as a live observable (volatile
+ * fields on 0.2.x are observables) and tolerate anything unusable.
+ */
+export function unwrapRules(value) {
+  const raw = value !== null && typeof value === 'object' && typeof value.get === 'function'
+    ? value.get()
+    : value
+  return Array.isArray(raw) ? raw : []
+}
+
 /** First enabled rule whose provider + model patterns both match. */
 export function selectRule(config, options) {
-  const rules = config?.rules ?? []
+  const rules = unwrapRules(config?.rules)
   const provider = resolveProvider(options)
   const model = resolveModelId(options)
   for (const rule of rules) {
@@ -360,7 +376,7 @@ export function apply(ctx, config) {
 
   // One line at boot so operators can tell "installed but idle" from
   // "installed and matching".
-  const activeRules = (config?.rules ?? []).filter((rule) => rule?.enabled !== false).length
+  const activeRules = unwrapRules(config?.rules).filter((rule) => rule?.enabled !== false).length
   ctx.logger?.info?.(
     `[model-session-headers] ${activeRules} active rule(s)` +
       (activeRules === 0 ? '; plugin idle until rules are configured' : ''),
