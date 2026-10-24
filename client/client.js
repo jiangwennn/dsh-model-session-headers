@@ -24,6 +24,15 @@ window.__ModuleLoader__.load({
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
+    // The badge's popover is portalled to <body>: rendered inside the chat
+    // header it is clipped by the sidebar, whose stacking context sits above
+    // the conversation pane. Without react-dom it falls back to inline.
+    let ReactDOM = null
+    try {
+      ReactDOM = require('react-dom')
+    } catch {
+      ReactDOM = null
+    }
 
     const PACKAGE = 'dsh-model-session-headers'
     const ROW_ID = 'model-session-headers'
@@ -125,12 +134,10 @@ window.__ModuleLoader__.load({
       },
       dot: { width: '7px', height: '7px', borderRadius: '50%', flex: 'none' },
       popover: {
-        position: 'absolute',
-        top: 'calc(100% + 6px)',
-        right: 0,
-        zIndex: 50,
+        position: 'fixed',
+        zIndex: 1000,
         width: '380px',
-        maxWidth: 'calc(100vw - 32px)',
+        maxWidth: 'calc(100vw - 16px)',
         maxHeight: '60vh',
         overflowY: 'auto',
         padding: '10px 12px',
@@ -426,10 +433,12 @@ window.__ModuleLoader__.load({
     class StatusBadge extends React.Component {
       constructor(props) {
         super(props)
-        this.state = { enabled: false, records: [], open: false, error: '' }
+        this.state = { enabled: false, records: [], open: false, error: '', anchor: null }
         this.rootRef = React.createRef()
+        this.popoverRef = React.createRef()
         this.poll = this.poll.bind(this)
         this.handleOutside = this.handleOutside.bind(this)
+        this.place = this.place.bind(this)
       }
 
       componentDidMount() {
@@ -437,6 +446,32 @@ window.__ModuleLoader__.load({
         this.poll()
         this.timer = setInterval(this.poll, POLL_MS)
         document.addEventListener('pointerdown', this.handleOutside, true)
+        // Fixed positioning does not follow layout changes on its own.
+        window.addEventListener('resize', this.place)
+        window.addEventListener('scroll', this.place, true)
+      }
+
+      /**
+       * Pin the popover under the chip, right edges aligned, then clamp it into
+       * the viewport so a narrow window never pushes it off the left edge.
+       */
+      place() {
+        if (!this.state.open) return
+        const chip = this.rootRef.current
+        if (!chip) return
+        const rect = chip.getBoundingClientRect()
+        const margin = 8
+        const width = Math.min(380, window.innerWidth - margin * 2)
+        const left = Math.max(margin, Math.min(rect.right - width, window.innerWidth - width - margin))
+        this.setState({ anchor: { top: rect.bottom + 6, left, width } })
+      }
+
+      toggleOpen() {
+        if (this.state.open) {
+          this.setState({ open: false })
+          return
+        }
+        this.setState({ open: true }, this.place)
       }
 
       componentDidUpdate(prev) {
@@ -453,12 +488,15 @@ window.__ModuleLoader__.load({
         clearInterval(this.timer)
         this.controller?.abort()
         document.removeEventListener('pointerdown', this.handleOutside, true)
+        window.removeEventListener('resize', this.place)
+        window.removeEventListener('scroll', this.place, true)
       }
 
       handleOutside(event) {
         if (!this.state.open) return
-        const root = this.rootRef.current
-        if (root && !root.contains(event.target)) this.setState({ open: false })
+        // The portalled popover is outside the chip's subtree; count it as inside.
+        const inside = [this.rootRef.current, this.popoverRef.current].some((node) => node && node.contains(event.target))
+        if (!inside) this.setState({ open: false })
       }
 
       async poll() {
@@ -493,6 +531,21 @@ window.__ModuleLoader__.load({
         } finally {
           if (this.controller === controller) this.controller = null
         }
+      }
+
+      /** Fixed coordinates from place(); hidden until measured to avoid a jump. */
+      popoverStyle() {
+        const anchor = this.state.anchor
+        if (!anchor) return { ...styles.popover, visibility: 'hidden', top: 0, left: 0 }
+        return { ...styles.popover, top: `${anchor.top}px`, left: `${anchor.left}px`, width: `${anchor.width}px` }
+      }
+
+      /** Mount on <body> when react-dom is available, else inline. */
+      portal(node) {
+        if (ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined' && document.body) {
+          return ReactDOM.createPortal(node, document.body)
+        }
+        return node
       }
 
       renderRecord(record, index) {
@@ -540,14 +593,14 @@ window.__ModuleLoader__.load({
           { ref: this.rootRef, style: styles.badgeRoot, 'data-dsh-model-session-headers': 'badge' },
           h(
             'button',
-            { type: 'button', style: styles.chip, title, 'aria-expanded': open, onClick: () => this.setState({ open: !open }) },
+            { type: 'button', style: styles.chip, title, 'aria-expanded': open, onClick: () => this.toggleOpen() },
             h('span', { style: { ...styles.dot, background: dotColor } }),
             label,
           ),
           open
-            ? h(
+            ? this.portal(h(
                 'div',
-                { style: styles.popover, role: 'dialog' },
+                { ref: this.popoverRef, style: this.popoverStyle(), role: 'dialog' },
                 h('div', { style: { ...styles.mono, opacity: 0.8, marginBottom: '4px' } }, `会话 ${session}`),
                 records.length === 0
                   ? h('div', { style: { opacity: 0.7, padding: '6px 0' } }, '这个对话还没有模型请求记录（DSH 重启后会清空）。')
@@ -558,7 +611,7 @@ window.__ModuleLoader__.load({
                   { style: { opacity: 0.55, fontSize: '11px', marginTop: '6px' } },
                   '只代表 DSH 已带上这个头发出去；中间网关（如 magpie）是否转发，这里看不到。',
                 ),
-              )
+              ))
             : null,
         )
       }
