@@ -633,9 +633,11 @@ window.__ModuleLoader__.load({
         ctx.slots.register({ name: 'plugins.bundle.config', key: PACKAGE }, Card),
       )
       // Session-scoped list slot: the renderer hands each entry `sessionId`.
+      // order 15 sits between the subagent catalog (10) and the job list (20): the job
+      // list only renders while jobs exist, so placing the badge after it made it jump.
       ctx.slots.inject('conversation.session.header.actions', () =>
         ctx.slots.register(
-          { name: 'conversation.session.header.actions', id: 'model-session-headers-status', order: 30 },
+          { name: 'conversation.session.header.actions', id: 'model-session-headers-status', order: 15 },
           StatusBadge,
         ),
       )
