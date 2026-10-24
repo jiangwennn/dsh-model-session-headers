@@ -116,6 +116,12 @@ export const Config = Schema.object({
   ).default(DEFAULT_RULES.map((rule) => ({ ...rule, models: [...rule.models] })))
     .volatile()
     .description('按模型匹配的规则表'),
+  /**
+   * Show the per-conversation send status in the chat header. Volatile for the
+   * same reason as `rules`: the settings card toggles it without a restart, so
+   * reads go through `unwrapFlag()`.
+   */
+  showStatus: Schema.boolean().default(true).volatile().description('在对话右上角显示头发送状态'),
   /** Log every injected call to the dsh console. */
   debug: Schema.boolean().default(false).description('输出调试日志'),
   /** Append one JSON line per injected call to this absolute path. */
@@ -186,6 +192,85 @@ export function unwrapRules(value) {
   if (raw === undefined) return DEFAULT_RULES
   return Array.isArray(raw) ? raw : []
 }
+
+/** Read a boolean that may arrive as a live observable; non-booleans fall back. */
+export function unwrapFlag(value, fallback) {
+  const raw = value !== null && typeof value === 'object' && typeof value.get === 'function'
+    ? value.get()
+    : value
+  return typeof raw === 'boolean' ? raw : fallback
+}
+
+/** Store key for a session id: the bare id, whatever form the caller holds. */
+export function sessionKeyOf(value) {
+  if (value === undefined || value === null) return undefined
+  const id = String(value).replace(/^session-/, '')
+  return id === '' ? undefined : id
+}
+
+/**
+ * Bounded in-memory log of recent calls per conversation, read by the chat
+ * header badge. Nothing is persisted: a restart starts empty.
+ * @param {{ perSession?: number, sessions?: number }} [limits]
+ */
+export function createStatusStore({ perSession = 10, sessions = 100 } = {}) {
+  /** Map insertion order doubles as recency: a write re-inserts its key. */
+  const bySession = new Map()
+  return {
+    add(sessionId, entry) {
+      const key = sessionKeyOf(sessionId)
+      if (key === undefined) return
+      const list = bySession.get(key) ?? []
+      bySession.delete(key)
+      bySession.set(key, [entry, ...list].slice(0, perSession))
+      // Evict the least recently written conversation beyond the cap.
+      while (bySession.size > sessions) bySession.delete(bySession.keys().next().value)
+    },
+    /** Newest first. */
+    recent(sessionId) {
+      const key = sessionKeyOf(sessionId)
+      return key === undefined ? [] : [...(bySession.get(key) ?? [])]
+    },
+    clear() {
+      bySession.clear()
+    },
+  }
+}
+
+/** Write one JSON body; the badge only ever reads, so no caching. */
+function writeJson(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(JSON.stringify(body))
+}
+
+/**
+ * Handler for `GET <STATUS_ROUTE>?session=<id>`.
+ * @param store - the status store
+ * @param isEnabled - live read of `showStatus`
+ * @param fence - true when the request passes the host's browser-trust check
+ */
+export function createStatusHandler(store, isEnabled, fence) {
+  return (req, res) => {
+    if (!fence(req)) {
+      writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+      return
+    }
+    if (req.method !== 'GET') {
+      writeJson(res, 405, { ok: false, error: { code: 'method', message: 'GET only' } })
+      return
+    }
+    const url = new URL(req.url ?? '/', 'http://dsh.internal')
+    const session = sessionKeyOf(url.searchParams.get('session') ?? undefined)
+    const enabled = isEnabled()
+    writeJson(res, 200, {
+      ok: true,
+      value: { enabled, session: session ?? null, records: enabled ? store.recent(session) : [] },
+    })
+  }
+}
+
+/** Host route the chat header badge polls (client: relative to the page base). */
+export const STATUS_ROUTE = '/model-session-headers/api/status'
 
 /** First enabled rule whose provider + model patterns both match. */
 export function selectRule(config, options) {
@@ -295,6 +380,28 @@ export function apply(ctx, config) {
     ? config.debugFile
     : undefined
 
+  // Per-conversation status for the chat header badge. `showStatus` is read
+  // on every call so the settings toggle applies without a restart.
+  const statusStore = createStatusStore()
+  const statusOn = () => unwrapFlag(config?.showStatus, true)
+  const noteStatus = (meta, status, injected = [], skipped = []) => {
+    if (!statusOn()) return
+    statusStore.add(meta.sessionKey, {
+      ts: new Date().toISOString(),
+      provider: meta.provider ?? null,
+      model: meta.model ?? null,
+      status,
+      headers: injected,
+      skipped,
+    })
+  }
+  const metaOf = (options) => ({
+    provider: resolveProvider(options),
+    model: resolveModelId(options),
+    session: sessionIdOf(options, config?.keepPrefix === true),
+    sessionKey: sessionKeyOf(options?.sessionId),
+  })
+
   const record = (meta, injected, skipped) => {
     if (!debug && debugFile === undefined) return
     const entry = {
@@ -322,21 +429,11 @@ export function apply(ctx, config) {
   }
 
   /** Header collection for one call: lower-case name -> [wire name, value]. */
-  const scopeFor = (options) => {
-    const rule = selectRule(config, options)
-    if (rule === undefined) return undefined
+  const scopeFor = (rule, options) => {
     const headers = buildHeaders(config, rule, options)
     if (headers.length === 0) return undefined
     const overwrite = rule.overwrite === undefined ? config?.overwrite === true : rule.overwrite === true
-    return {
-      headers,
-      overwrite,
-      meta: {
-        provider: resolveProvider(options),
-        model: resolveModelId(options),
-        session: sessionIdOf(options, config?.keepPrefix === true),
-      },
-    }
+    return { headers, overwrite, meta: metaOf(options) }
   }
 
   const patchedFetch = (input, init) => {
@@ -364,7 +461,10 @@ export function apply(ctx, config) {
       headers.set(headerName, value)
       injected.push([headerName, value])
     }
-    if (injected.length > 0 || skipped.length > 0) record(scope.meta, injected, skipped)
+    if (injected.length > 0 || skipped.length > 0) {
+      record(scope.meta, injected, skipped)
+      noteStatus(scope.meta, injected.length > 0 ? 'sent' : 'skipped', injected, skipped)
+    }
     if (injected.length === 0) return originalFetch(input, init)
 
     // A bare Request input owns its headers; rebuild it so the original —
@@ -388,9 +488,29 @@ export function apply(ctx, config) {
     }
   })
 
+  ctx.effect(() => () => statusStore.clear())
+
+  // The badge's read-only route. Optional services: a host without a web
+  // server (headless, tests) simply has no badge.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer', 'connection'], (sub) => {
+      const fence = (req) => sub.connection.requestRejection(req) === undefined
+      sub.effect(() => sub.webServer.register({
+        kind: 'exact',
+        path: STATUS_ROUTE,
+        handler: createStatusHandler(statusStore, statusOn, fence),
+      }))
+    })
+  }
+
   ctx.on('llm/stream', async function* (options, next) {
-    const scope = scopeFor(options)
+    const rule = selectRule(config, options)
+    const scope = rule === undefined ? undefined : scopeFor(rule, options)
     if (scope === undefined) {
+      // `empty`: a rule matched but produced no header (e.g. `mode: fixed`
+      // without a value). Calls with no session id land nowhere — there is no
+      // conversation to show them in.
+      noteStatus(metaOf(options), rule === undefined ? 'unmatched' : 'empty')
       yield* next()
       return
     }

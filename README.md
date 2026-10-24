@@ -50,6 +50,25 @@ web profile 里，打开「设置 → 插件 → Installed plugins → dsh-model
 - `rules` 必须声明 `.volatile()`，否则 `SettingsForms.write()` 以 `not volatile` 拒绝写入；但 volatile 字段会被 DSH 换成 **observable** 传给插件，直接 `.filter()` 会抛错，所以读取统一走 `unwrapRules()`。
 - 插槽渲染器以普通函数调用的方式执行组件，**函数组件里的 React hooks 不生效**（组件静默不渲染），所以卡片写成 class 组件。
 
+## 对话右上角的发送状态
+
+每个对话的头部右侧（「后台任务」按钮旁边）会显示一个状态标记：圆点 + 最近一次请求的头名称。
+
+| 圆点 | 含义 |
+| --- | --- |
+| 绿 | 已发送：DSH 已带上这个头发出请求 |
+| 黄 | 跳过：请求里已有同名头且 `overwrite` 关闭，保留了原值 |
+| 灰 | 未命中规则，或还没有请求记录 |
+
+点开后列出会话 id 和这个对话最近 10 次请求：时间、provider / 模型、状态、实际发出的头和值（跳过时显示已存在的值）。
+
+- **默认开启**。在设置卡片里取消「在对话右上角显示发送状态」即可关闭，保存后无需重启；关闭期间不再记录。等价 YAML：`showStatus: false`。
+- 记录只在内存中，每个对话最多 10 条、最多保留 100 个对话，DSH 重启后清空。
+- 没有会话 id 的内部辅助请求无法归属到某个对话，不会出现在列表里。
+- 只能证明 **DSH 这一跳**已发出。中间网关（如 magpie）是否把头转发给上游，这里看不到——那需要看网关自己的日志。
+
+实现：host 端注册只读接口 `GET /model-session-headers/api/status?session=<id>`，经 `connection.requestRejection` 做浏览器信任校验；前端每 3 秒（页面不可见时暂停）按**页面自身的 base** 解析相对路径请求它——desktop 页面是 `dsh-app://app/`，直接请求 host 的 `127.0.0.1` 源会因跨域被浏览器拦截。
+
 ## 配置
 
 写在 profile 的 `cordis.patch.yml`（或本包自带的同名文件，安装后按 id 覆盖整个 `config`，需写全量）：

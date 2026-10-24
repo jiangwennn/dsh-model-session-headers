@@ -3,8 +3,11 @@ import http from 'node:http'
 import { after, before, describe, test } from 'node:test'
 
 import {
+  STATUS_ROUTE,
   apply,
   buildHeaders,
+  createStatusHandler,
+  createStatusStore,
   matchesAny,
   selectRule,
   uuidFrom,
@@ -65,30 +68,35 @@ const baseConfig = {
   ],
 }
 
+/** Run one fake llm/stream call on an applied ctx; returns what the server saw. */
+async function streamOnce(ctx, options, init = {}) {
+  const handler = ctx.listeners.get('llm/stream')
+  assert.equal(typeof handler, 'function', 'llm/stream listener registered')
+
+  lastRequest = undefined
+  const stream = handler(options, async function* () {
+    const response = await fetch(baseUrl, {
+      method: 'POST',
+      body: '{"hello":"world"}',
+      ...init,
+    })
+    await response.text()
+    yield { chunk: 1 }
+  })
+
+  const chunks = []
+  for await (const chunk of stream) chunks.push(chunk)
+  assert.deepEqual(chunks, [{ chunk: 1 }])
+  return lastRequest.headers
+}
+
 /** Drive one fake llm/stream call through the plugin and return the headers. */
 async function callModel(config, options, init = {}) {
   const ctx = createCtx()
   const originalFetch = globalThis.fetch
   apply(ctx, config)
   try {
-    const handler = ctx.listeners.get('llm/stream')
-    assert.equal(typeof handler, 'function', 'llm/stream listener registered')
-
-    lastRequest = undefined
-    const stream = handler(options, async function* () {
-      const response = await fetch(baseUrl, {
-        method: 'POST',
-        body: '{"hello":"world"}',
-        ...init,
-      })
-      await response.text()
-      yield { chunk: 1 }
-    })
-
-    const chunks = []
-    for await (const chunk of stream) chunks.push(chunk)
-    assert.deepEqual(chunks, [{ chunk: 1 }])
-    return lastRequest.headers
+    return await streamOnce(ctx, options, init)
   } finally {
     ctx.dispose()
     assert.equal(globalThis.fetch, originalFetch, 'fetch restored on dispose')
@@ -323,5 +331,162 @@ describe('llm/stream injection', () => {
       model: 'claude-sonnet-4-6',
     })
     assert.equal(headers['x-claude-code-session-id'], undefined)
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* Chat-header status                                                  */
+/* ------------------------------------------------------------------ */
+
+/** Fake res capturing one JSON reply. */
+function fakeRes() {
+  const res = {
+    status: undefined,
+    body: undefined,
+    writeHead(status) {
+      res.status = status
+    },
+    end(text) {
+      res.body = JSON.parse(text)
+    },
+  }
+  return res
+}
+
+/** createCtx plus the optional webServer/connection services; captures the route. */
+function createStatusCtx({ trusted = true } = {}) {
+  const ctx = createCtx()
+  ctx.routes = []
+  ctx.inject = (deps, fn) => {
+    assert.deepEqual(deps, ['webServer', 'connection'])
+    fn({
+      effect: ctx.effect,
+      webServer: {
+        register(route) {
+          ctx.routes.push(route)
+          return () => {}
+        },
+      },
+      connection: { requestRejection: () => (trusted ? undefined : { code: 'forbidden' }) },
+    })
+  }
+  return ctx
+}
+
+/** GET the status route for one session. */
+function readStatus(ctx, session) {
+  const route = ctx.routes.find((candidate) => candidate.path === STATUS_ROUTE)
+  assert.ok(route, 'status route registered')
+  const res = fakeRes()
+  route.handler({ method: 'GET', url: `${STATUS_ROUTE}?session=${encodeURIComponent(session)}` }, res)
+  return res
+}
+
+describe('status store', () => {
+  test('keeps the newest records per session, keyed by the bare id', () => {
+    const store = createStatusStore({ perSession: 2, sessions: 2 })
+    store.add('session-a', { n: 1 })
+    store.add('a', { n: 2 })
+    store.add('session-a', { n: 3 })
+    assert.deepEqual(store.recent('a').map((entry) => entry.n), [3, 2])
+    assert.deepEqual(store.recent('session-a').map((entry) => entry.n), [3, 2])
+    store.add(undefined, { n: 9 })
+    assert.deepEqual(store.recent(undefined), [])
+  })
+
+  test('evicts the least recently written session beyond the cap', () => {
+    const store = createStatusStore({ perSession: 5, sessions: 2 })
+    store.add('a', { n: 1 })
+    store.add('b', { n: 2 })
+    store.add('a', { n: 3 })
+    store.add('c', { n: 4 })
+    assert.deepEqual(store.recent('b'), [])
+    assert.equal(store.recent('a').length, 2)
+    assert.equal(store.recent('c').length, 1)
+  })
+
+  test('the handler fences, rejects non-GET and honours the toggle', () => {
+    const store = createStatusStore()
+    store.add('s1', { status: 'sent' })
+    const get = (handler, method = 'GET') => {
+      const res = fakeRes()
+      handler({ method, url: `${STATUS_ROUTE}?session=session-s1` }, res)
+      return res
+    }
+    assert.equal(get(createStatusHandler(store, () => true, () => false)).status, 403)
+    assert.equal(get(createStatusHandler(store, () => true, () => true), 'POST').status, 405)
+    const on = get(createStatusHandler(store, () => true, () => true))
+    assert.equal(on.status, 200)
+    assert.deepEqual(on.body.value, { enabled: true, session: 's1', records: [{ status: 'sent' }] })
+    const off = get(createStatusHandler(store, () => false, () => true))
+    assert.deepEqual(off.body.value, { enabled: false, session: 's1', records: [] })
+  })
+})
+
+describe('status recording through llm/stream', () => {
+  test('records sent, skipped and unmatched calls per conversation', async () => {
+    const ctx = createStatusCtx()
+    apply(ctx, baseConfig)
+    try {
+      await streamOnce(ctx, { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-c1' })
+      await streamOnce(
+        ctx,
+        { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-c1' },
+        { headers: { 'x-claude-code-session-id': 'adapter-value' } },
+      )
+      await streamOnce(ctx, { provider: 'gw', model: 'gpt-5', sessionId: 'session-c1' })
+      await streamOnce(ctx, { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-other' })
+
+      const res = readStatus(ctx, 'session-c1')
+      assert.equal(res.status, 200)
+      assert.equal(res.body.value.enabled, true)
+      const records = res.body.value.records
+      // Newest first.
+      assert.deepEqual(records.map((record) => record.status), ['unmatched', 'skipped', 'sent'])
+      assert.deepEqual(records[2].headers, [['x-claude-code-session-id', 'c1']])
+      assert.equal(records[2].model, 'claude-sonnet-4-6')
+      assert.deepEqual(records[1].skipped, [['x-claude-code-session-id', 'adapter-value']])
+      assert.deepEqual(records[0].headers, [])
+      // Other conversations stay separate.
+      assert.equal(readStatus(ctx, 'other').body.value.records.length, 1)
+    } finally {
+      ctx.dispose()
+    }
+  })
+
+  test('the toggle is read live and an untrusted request is refused', async () => {
+    let show = true
+    const ctx = createStatusCtx()
+    apply(ctx, { ...baseConfig, showStatus: { get: () => show } })
+    try {
+      await streamOnce(ctx, { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-t1' })
+      show = false
+      await streamOnce(ctx, { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-t1' })
+      assert.deepEqual(readStatus(ctx, 't1').body.value, { enabled: false, session: 't1', records: [] })
+      show = true
+      // Only the call made while on was recorded.
+      assert.equal(readStatus(ctx, 't1').body.value.records.length, 1)
+    } finally {
+      ctx.dispose()
+    }
+
+    const untrusted = createStatusCtx({ trusted: false })
+    apply(untrusted, baseConfig)
+    try {
+      assert.equal(readStatus(untrusted, 't1').status, 403)
+    } finally {
+      untrusted.dispose()
+    }
+  })
+
+  test('status defaults to on when showStatus is absent', async () => {
+    const ctx = createStatusCtx()
+    apply(ctx, { rules: baseConfig.rules })
+    try {
+      await streamOnce(ctx, { provider: 'gw', model: 'claude-sonnet-4-6', sessionId: 'session-d1' })
+      assert.equal(readStatus(ctx, 'd1').body.value.records[0].status, 'sent')
+    } finally {
+      ctx.dispose()
+    }
   })
 })

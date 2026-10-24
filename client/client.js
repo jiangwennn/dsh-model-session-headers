@@ -1,6 +1,7 @@
 /**
  * Client half of dsh-model-session-headers: the rule editor on the DSH
- * plugins page.
+ * plugins page, and the per-conversation send-status badge in the chat header
+ * (`conversation.session.header.actions`, polling the host's status route).
  *
  * Facts this file depends on (verified against dsh 0.2.1-rc.2 web):
  *   - the plugins page renders only what a plugin registers under
@@ -106,9 +107,76 @@ window.__ModuleLoader__.load({
       },
       disabled: { opacity: 0.45, cursor: 'default' },
       danger: { background: 'transparent', border: 'none', color: 'inherit', opacity: 0.65, cursor: 'pointer', fontSize: '12px' },
+      toggle: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', opacity: 0.85 },
+      badgeRoot: { position: 'relative', display: 'inline-flex' },
+      chip: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '2px 9px',
+        borderRadius: '999px',
+        border: '1px solid color-mix(in srgb, currentColor 22%, transparent)',
+        background: 'transparent',
+        color: 'inherit',
+        font: 'inherit',
+        fontSize: '12px',
+        whiteSpace: 'nowrap',
+        cursor: 'pointer',
+      },
+      dot: { width: '7px', height: '7px', borderRadius: '50%', flex: 'none' },
+      popover: {
+        position: 'absolute',
+        top: 'calc(100% + 6px)',
+        right: 0,
+        zIndex: 50,
+        width: '380px',
+        maxWidth: 'calc(100vw - 32px)',
+        maxHeight: '60vh',
+        overflowY: 'auto',
+        padding: '10px 12px',
+        borderRadius: '10px',
+        border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
+        // Canvas / CanvasText follow the page's color-scheme, so the panel is
+        // opaque in both themes without guessing DSH's variable names.
+        background: 'Canvas',
+        color: 'CanvasText',
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
+        fontSize: '12px',
+        lineHeight: '1.6',
+        textAlign: 'left',
+      },
+      mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', wordBreak: 'break-all' },
+      record: { borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)', padding: '6px 0' },
+      recordTop: { display: 'flex', justifyContent: 'space-between', gap: '8px', opacity: 0.75 },
+      tag: { flex: 'none', fontSize: '11px', padding: '0 6px', borderRadius: '4px' },
       meta: { opacity: 0.5, fontSize: '11px' },
       status: { fontSize: '12px', opacity: 0.75 },
       empty: { opacity: 0.65, fontSize: '12px' },
+    }
+
+    /** Host route serving the per-conversation status (see STATUS_ROUTE in ../index.js). */
+    const STATUS_PATH = 'model-session-headers/api/status'
+    const POLL_MS = 3000
+    const STATUS_LABEL = { sent: '已发送', skipped: '跳过', unmatched: '未命中规则', empty: '无值' }
+    const STATUS_COLOR = { sent: '#2ea043', skipped: '#d29922' }
+
+    /**
+     * Resolve the status route against the PAGE base, not the injected transport
+     * origin: in the desktop shell the page is `dsh-app://app/` and only that
+     * origin is forwarded to the Host same-origin; the Host's `127.0.0.1` origin
+     * would be cross-origin and the browser would refuse the response. A relative
+     * path also keeps a reverse-proxy directory prefix.
+     */
+    const statusUrl = (sessionId) => {
+      const base = typeof document !== 'undefined' && document.baseURI ? document.baseURI : 'http://dsh.internal/'
+      const url = new URL(STATUS_PATH, base)
+      url.searchParams.set('session', String(sessionId))
+      return url.href
+    }
+
+    const timeOf = (iso) => {
+      const date = new Date(iso)
+      return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour12: false })
     }
 
     const parseModels = (text) =>
@@ -123,6 +191,22 @@ window.__ModuleLoader__.load({
         this.state = { snap: null, draft: null, status: 'idle', message: '' }
         this.read = this.read.bind(this)
         this.handleSave = this.handleSave.bind(this)
+        this.handleToggleStatus = this.handleToggleStatus.bind(this)
+      }
+
+      /** Saved immediately and independently of the rule draft. */
+      async handleToggleStatus(event) {
+        if (!activeForm) return
+        const checked = event.target.checked
+        try {
+          const ok = await activeForm.mutate([{ op: 'set', path: ['showStatus'], value: checked }])
+          this.setState(ok
+            ? { status: 'saved', message: checked ? '已开启对话右上角的发送状态' : '已关闭对话右上角的发送状态' }
+            : { status: 'refused', message: 'Host 拒绝了这次写入' })
+          if (ok) this.read()
+        } catch (error) {
+          this.setState({ status: 'error', message: String(error?.message ?? error) })
+        }
       }
 
       componentDidMount() {
@@ -297,7 +381,23 @@ window.__ModuleLoader__.load({
         const footer = h(
           'div',
           { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' } },
-          h('button', { type: 'button', style: styles.button, disabled: !writable, onClick: () => this.addRule() }, '添加规则'),
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '14px' } },
+            h('button', { type: 'button', style: styles.button, disabled: !writable, onClick: () => this.addRule() }, '添加规则'),
+            h(
+              'label',
+              { style: styles.toggle },
+              h('input', {
+                type: 'checkbox',
+                // Absent = the schema default (on).
+                checked: snap.value?.showStatus !== false,
+                disabled: !writable,
+                onChange: this.handleToggleStatus,
+              }),
+              '在对话右上角显示发送状态',
+            ),
+          ),
           h(
             'div',
             { style: { ...styles.status, color: status === 'refused' || status === 'error' ? '#d4380d' : undefined } },
@@ -317,6 +417,153 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Chat-header badge: a status dot plus the header name of the latest call,
+     * opening a list of the conversation's recent calls. Class component for the
+     * same hook-dispatcher reason as Card. `sessionId` comes from the slot's
+     * session scope.
+     */
+    class StatusBadge extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { enabled: false, records: [], open: false, error: '' }
+        this.rootRef = React.createRef()
+        this.poll = this.poll.bind(this)
+        this.handleOutside = this.handleOutside.bind(this)
+      }
+
+      componentDidMount() {
+        this.alive = true
+        this.poll()
+        this.timer = setInterval(this.poll, POLL_MS)
+        document.addEventListener('pointerdown', this.handleOutside, true)
+      }
+
+      componentDidUpdate(prev) {
+        if (prev.sessionId === this.props.sessionId) return
+        // Another conversation: drop the old list instead of showing it under
+        // the new header until the next poll lands.
+        this.controller?.abort()
+        this.setState({ records: [], open: false, error: '' })
+        this.poll()
+      }
+
+      componentWillUnmount() {
+        this.alive = false
+        clearInterval(this.timer)
+        this.controller?.abort()
+        document.removeEventListener('pointerdown', this.handleOutside, true)
+      }
+
+      handleOutside(event) {
+        if (!this.state.open) return
+        const root = this.rootRef.current
+        if (root && !root.contains(event.target)) this.setState({ open: false })
+      }
+
+      async poll() {
+        const sessionId = this.props.sessionId
+        // Background tabs skip a beat; the interval picks up when visible.
+        if (!sessionId || document.hidden || this.controller) return
+        const controller = new AbortController()
+        this.controller = controller
+        try {
+          const response = await fetch(statusUrl(sessionId), {
+            headers: { accept: 'application/json' },
+            signal: controller.signal,
+          })
+          const body = await response.json().catch(() => null)
+          if (!this.alive || sessionId !== this.props.sessionId) return
+          if (response.ok && body?.ok === true) {
+            const value = body.value ?? {}
+            this.setState({
+              enabled: value.enabled === true,
+              records: Array.isArray(value.records) ? value.records : [],
+              error: '',
+            })
+          } else if (response.status === 404) {
+            // Host half older than this client (route absent): stay hidden.
+            this.setState({ enabled: false })
+          } else {
+            this.setState({ error: body?.error?.message ?? `HTTP ${response.status}` })
+          }
+        } catch (error) {
+          if (controller.signal.aborted || !this.alive) return
+          this.setState({ error: String(error?.message ?? error) })
+        } finally {
+          if (this.controller === controller) this.controller = null
+        }
+      }
+
+      renderRecord(record, index) {
+        const status = STATUS_LABEL[record.status] ? record.status : 'unmatched'
+        const color = STATUS_COLOR[status]
+        const tagStyle = {
+          ...styles.tag,
+          background: color ? `color-mix(in srgb, ${color} 16%, transparent)` : 'color-mix(in srgb, currentColor 10%, transparent)',
+          color: color ?? 'inherit',
+        }
+        const target = [record.provider, record.model].filter(Boolean).join(' / ') || '未知模型'
+        const lines = []
+        for (const [name, value] of record.headers ?? []) {
+          lines.push(h('div', { key: `h-${name}`, style: styles.mono }, `${name}: ${value}`))
+        }
+        for (const [name, value] of record.skipped ?? []) {
+          lines.push(
+            h('div', { key: `s-${name}`, style: { ...styles.mono, opacity: 0.8 } }, `${name}: 已存在 ${value}（未覆盖）`),
+          )
+        }
+        if (lines.length === 0) {
+          lines.push(
+            h('div', { key: 'none', style: { opacity: 0.7 } }, status === 'empty' ? '命中规则，但没有可发送的值' : '没有命中规则，未加任何头'),
+          )
+        }
+        return h(
+          'div',
+          { key: `${record.ts}-${index}`, style: styles.record },
+          h('div', { style: styles.recordTop }, h('span', null, `${timeOf(record.ts)} · ${target}`), h('span', { style: tagStyle }, STATUS_LABEL[status])),
+          lines,
+        )
+      }
+
+      render() {
+        const { enabled, records, open, error } = this.state
+        if (!enabled) return null
+        const latest = records[0]
+        const dotColor = STATUS_COLOR[latest?.status] ?? 'color-mix(in srgb, currentColor 40%, transparent)'
+        const label = latest?.headers?.[0]?.[0] ?? latest?.skipped?.[0]?.[0] ?? '会话头'
+        const title = latest ? `最近一次：${STATUS_LABEL[latest.status] ?? latest.status}` : '还没有请求记录'
+        const session = String(this.props.sessionId ?? '').replace(/^session-/, '')
+
+        return h(
+          'div',
+          { ref: this.rootRef, style: styles.badgeRoot, 'data-dsh-model-session-headers': 'badge' },
+          h(
+            'button',
+            { type: 'button', style: styles.chip, title, 'aria-expanded': open, onClick: () => this.setState({ open: !open }) },
+            h('span', { style: { ...styles.dot, background: dotColor } }),
+            label,
+          ),
+          open
+            ? h(
+                'div',
+                { style: styles.popover, role: 'dialog' },
+                h('div', { style: { ...styles.mono, opacity: 0.8, marginBottom: '4px' } }, `会话 ${session}`),
+                records.length === 0
+                  ? h('div', { style: { opacity: 0.7, padding: '6px 0' } }, '这个对话还没有模型请求记录（DSH 重启后会清空）。')
+                  : records.map((record, index) => this.renderRecord(record, index)),
+                error ? h('div', { style: { color: '#d4380d', marginTop: '4px' } }, `刷新失败：${error}`) : null,
+                h(
+                  'div',
+                  { style: { opacity: 0.55, fontSize: '11px', marginTop: '6px' } },
+                  '只代表 DSH 已带上这个头发出去；中间网关（如 magpie）是否转发，这里看不到。',
+                ),
+              )
+            : null,
+        )
+      }
+    }
+
     function apply(ctx) {
       const configForms = ctx.configForms
       if (configForms) {
@@ -331,6 +578,13 @@ window.__ModuleLoader__.load({
       )
       ctx.slots.inject('plugins.bundle.config', () =>
         ctx.slots.register({ name: 'plugins.bundle.config', key: PACKAGE }, Card),
+      )
+      // Session-scoped list slot: the renderer hands each entry `sessionId`.
+      ctx.slots.inject('conversation.session.header.actions', () =>
+        ctx.slots.register(
+          { name: 'conversation.session.header.actions', id: 'model-session-headers-status', order: 30 },
+          StatusBadge,
+        ),
       )
     }
 
