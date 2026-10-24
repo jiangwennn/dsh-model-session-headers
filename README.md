@@ -82,6 +82,17 @@ web profile 里，打开「设置 → 插件 → Installed plugins → dsh-model
               x-routing-key: "{provider}/{model}"
 ```
 
+### 默认规则
+
+未配置 `rules` 时内置两条规则（本包自带的 `cordis.patch.yml` 也写的是这两条）：
+
+| 模型 | flavor | 示例 |
+| --- | --- | --- |
+| `opencode/*`、`*/opencode/*` | `opencode-go` | `opencode/deepseek-v4.1-flash`、`aihub/opencode/deepseek-v4.1-flash` |
+| `claude-*` | `claude-code` | `claude-sonnet-4-6`、`anthropic/claude-sonnet-4-6` |
+
+显式写 `rules: []` 表示停用全部注入；profile 里已有的 `rules` 会整体覆盖默认规则。
+
 ### 规则匹配
 
 - 规则**自上而下**求值，**首条命中**生效；未命中任何规则的调用原样透传。

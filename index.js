@@ -47,6 +47,19 @@ export const FLAVORS = {
   generic: { 'x-session-id': '{sessionId}' },
 }
 
+/**
+ * Rules used when the profile never configured `rules` at all. An explicit
+ * empty list still means "idle" — only an absent field falls back here.
+ *
+ * Matching tries the full id and its last path segment, so a route prefix in
+ * the middle (`aihub/opencode/deepseek-v4.1-flash`) needs its own pattern;
+ * `claude-*` already covers `anthropic/claude-*` via the basename.
+ */
+export const DEFAULT_RULES = Object.freeze([
+  Object.freeze({ models: Object.freeze(['opencode/*', '*/opencode/*']), flavor: 'opencode-go', enabled: true }),
+  Object.freeze({ models: Object.freeze(['claude-*']), flavor: 'claude-code', enabled: true }),
+])
+
 export const Config = Schema.object({
   /**
    * How the header value is derived.
@@ -69,13 +82,14 @@ export const Config = Schema.object({
   /** Overwrite a header the adapter (or another plugin) already set. */
   overwrite: Schema.boolean().default(false).description('已存在同名头时是否覆盖'),
   /**
-   * Ordered rule table; the first matching rule wins. Empty = plugin idle.
+   * Ordered rule table; the first matching rule wins. Absent = DEFAULT_RULES,
+   * explicit empty list = plugin idle.
    *
    * `volatile` is what makes this list writable from the settings page:
    * SettingsForms refuses any write path that is not volatile, and a volatile
    * *field* is legal (only volatile nodes INSIDE a list are rejected). DSH then
    * hands the plugin a live observable instead of a plain array, so every read
-   * goes through `unwrapRules()`. Note the field loses its `.default([])` when
+   * goes through `unwrapRules()`. Note the field loses its `.default()` when
    * wrapped — `unwrapRules(undefined)` covers that.
    */
   rules: Schema.array(
@@ -99,7 +113,9 @@ export const Config = Schema.object({
       overwrite: Schema.boolean().description('该规则是否覆盖已存在的头'),
       enabled: Schema.boolean().default(true).description('是否启用该规则'),
     }),
-  ).default([]).volatile().description('按模型匹配的规则表'),
+  ).default(DEFAULT_RULES.map((rule) => ({ ...rule, models: [...rule.models] })))
+    .volatile()
+    .description('按模型匹配的规则表'),
   /** Log every injected call to the dsh console. */
   debug: Schema.boolean().default(false).description('输出调试日志'),
   /** Append one JSON line per injected call to this absolute path. */
@@ -160,12 +176,14 @@ export function matchesAny(patterns, value) {
 
 /**
  * Unwrap a rule list that DSH may hand over as a live observable (volatile
- * fields on 0.2.x are observables) and tolerate anything unusable.
+ * fields on 0.2.x are observables). An absent list falls back to
+ * DEFAULT_RULES; anything else unusable is treated as "no rules".
  */
 export function unwrapRules(value) {
   const raw = value !== null && typeof value === 'object' && typeof value.get === 'function'
     ? value.get()
     : value
+  if (raw === undefined) return DEFAULT_RULES
   return Array.isArray(raw) ? raw : []
 }
 

@@ -32,6 +32,12 @@ window.__ModuleLoader__.load({
       'opencode-go': 'opencode-go · x-opencode-session',
       generic: 'generic · x-session-id',
     }
+    // Mirror of DEFAULT_RULES in ../index.js (the host applies these when the
+    // profile has no `rules`); keep both in sync.
+    const DEFAULT_RULES = [
+      { models: ['opencode/*', '*/opencode/*'], flavor: 'opencode-go', enabled: true },
+      { models: ['claude-*'], flavor: 'claude-code', enabled: true },
+    ]
 
     /** Form controller handed over by apply(); null when the service is absent. */
     let activeForm = null
@@ -88,11 +94,17 @@ window.__ModuleLoader__.load({
         fontSize: '12px',
         cursor: 'pointer',
       },
+      // Emphasis derived from the inherited text colour only. `currentColor`
+      // resolves against the button's OWN `color`, so pairing it with an
+      // inverted text colour (the old `var(--dsh-bg, #fff)`, a variable DSH
+      // never defines) painted the button the page colour: invisible yet
+      // clickable.
       primary: {
-        background: 'color-mix(in srgb, currentColor 86%, transparent)',
-        color: 'var(--dsh-bg, #fff)',
-        borderColor: 'transparent',
+        background: 'color-mix(in srgb, currentColor 14%, transparent)',
+        borderColor: 'color-mix(in srgb, currentColor 55%, transparent)',
+        fontWeight: 600,
       },
+      disabled: { opacity: 0.45, cursor: 'default' },
       danger: { background: 'transparent', border: 'none', color: 'inherit', opacity: 0.65, cursor: 'pointer', fontSize: '12px' },
       meta: { opacity: 0.5, fontSize: '11px' },
       status: { fontSize: '12px', opacity: 0.75 },
@@ -149,6 +161,9 @@ window.__ModuleLoader__.load({
       rules() {
         if (Array.isArray(this.state.draft)) return this.state.draft
         const rules = this.state.snap?.value?.rules
+        // Absent = the host is running DEFAULT_RULES; show them so the card
+        // matches what is actually injected.
+        if (rules === undefined) return DEFAULT_RULES
         return Array.isArray(rules) ? rules : []
       }
 
@@ -216,7 +231,11 @@ window.__ModuleLoader__.load({
               'button',
               {
                 type: 'button',
-                style: { ...styles.button, ...(dirty && writable ? styles.primary : {}) },
+                style: {
+                  ...styles.button,
+                  ...(dirty && writable ? styles.primary : {}),
+                  ...(!dirty || busy || !writable ? styles.disabled : {}),
+                },
                 disabled: !dirty || busy || !writable,
                 onClick: this.handleSave,
               },

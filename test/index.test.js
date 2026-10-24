@@ -123,6 +123,21 @@ describe('matching', () => {
     assert.equal(selectRule(config, { provider: 'gw', model: 'gpt-5' }).flavor, 'generic')
     assert.equal(selectRule({ rules: [] }, { model: 'claude-sonnet-4-6' }), undefined)
   })
+
+  test('absent rules fall back to the defaults; an explicit empty list stays idle', () => {
+    const flavorOf = (config, model) => selectRule(config, { provider: 'gw', model })?.flavor
+    // Absent: opencode-prefixed routes (bare or behind a gateway) and claude-*.
+    assert.equal(flavorOf({}, 'opencode/deepseek-v4.1-flash'), 'opencode-go')
+    assert.equal(flavorOf({}, 'aihub/opencode/deepseek-v4.1-flash'), 'opencode-go')
+    assert.equal(flavorOf({}, 'claude-sonnet-4-6'), 'claude-code')
+    assert.equal(flavorOf({}, 'anthropic/claude-sonnet-4-6'), 'claude-code')
+    assert.equal(flavorOf({}, 'aihub/deepseek-v4.1-flash'), undefined)
+    assert.equal(flavorOf({}, 'my-opencode-model'), undefined)
+    // A live observable whose value is absent behaves the same.
+    assert.equal(flavorOf({ rules: { get: () => undefined } }, 'claude-opus-4'), 'claude-code')
+    // Explicit empty list: the operator opted out.
+    assert.equal(flavorOf({ rules: [] }, 'opencode/deepseek-v4.1-flash'), undefined)
+  })
 })
 
 describe('header building', () => {

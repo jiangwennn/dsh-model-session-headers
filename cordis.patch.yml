@@ -6,7 +6,8 @@
 # Rules are evaluated top-down; the first match wins. Each rule selects a
 # header preset by `flavor` and can add/override headers with `headers`.
 #
-# `rules` is empty by default so the plugin stays idle until you opt in.
+# Default rules: OpenCode-routed models get x-opencode-session, claude-*
+# models get x-claude-code-session-id. Set `rules: []` to keep the plugin idle.
 - insert:
     - id: model-session-headers
       name: dsh-model-session-headers
@@ -17,12 +18,16 @@
         overwrite: false      # never replace a header the adapter already set
         debug: false
         # debugFile: /tmp/model-session-headers.jsonl
-        rules: []
-        # Example: Claude Code compatible header for Anthropic-style models
-        #   - models: ["claude-*", "anthropic/claude-*"]
-        #     flavor: claude-code
+        rules:
+          # `opencode/*` covers a bare route; `*/opencode/*` covers one behind a
+          # gateway prefix such as `aihub/opencode/deepseek-v4.1-flash`.
+          - models: ["opencode/*", "*/opencode/*"]
+            flavor: opencode-go
+          # The basename is matched too, so this also covers `anthropic/claude-*`.
+          - models: ["claude-*"]
+            flavor: claude-code
         #
-        # Example: OpenCode Go compatible header for OpenCode-routed models
+        # Example: OpenCode Go header restricted to one provider route
         #   - models: ["deepseek-v4*"]
         #     providers: [opencode-go]
         #     flavor: opencode-go
